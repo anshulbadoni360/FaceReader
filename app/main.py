@@ -1,6 +1,5 @@
 """FastAPI application - Main entry point."""
 
-import os
 import time
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -19,7 +18,7 @@ from app.database import db
 
 
 app = FastAPI(
-    root_path="/facereader/" if os.environ.get("ENV") == "production" else "",
+    root_path=settings.ROOT_PATH,
     title=settings.APP_NAME,
     version=settings.VERSION,
     description="Fast Face Emotion Analysis API using Action Units",

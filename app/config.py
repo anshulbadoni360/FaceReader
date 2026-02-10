@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Face Emotion API"
     VERSION: str = "1.0.0"
     DEBUG: bool = False
+    ROOT_PATH: str = ""
     
     # Model paths
     MODEL_PATH: str = "checkpoints/best_model.pt"
