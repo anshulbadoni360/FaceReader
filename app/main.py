@@ -23,7 +23,8 @@ app = FastAPI(
     version=settings.VERSION,
     description="Fast Face Emotion Analysis API using Action Units",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
 )
 
 app.add_middleware(
