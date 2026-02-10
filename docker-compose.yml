@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  emotion-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./face:/app/face
+    environment:
+      - MODEL_PATH=checkpoints/best_model.pt
+      - SCALER_PATH=checkpoints/scaler_params.json
+    restart: unless-stopped
