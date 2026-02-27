@@ -58,7 +58,7 @@ def validate_file(file: UploadFile) -> None:
     ext = file.filename.split(".")[-1].lower() if file.filename else ""
     if ext not in settings.ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"Invalid file type. Allowed: {settings.ALLOWED_EXTENSIONS}")
-    if not file.content_type.startswith("image/"):
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
 
 

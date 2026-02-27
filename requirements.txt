@@ -9,3 +9,6 @@ torch>=2.0.0
 opencv-python>=4.8.0
 mediapipe==0.10.18
 pillow>=10.0.0
+deepface>=0.0.84
+transformers>=4.30.0
+requests>=2.31.0

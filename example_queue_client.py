@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 
-API_URL = "http://localhost:8000"
+API_URL = "http://localhost:9090"
 POLL_INTERVAL = 1  # seconds
 MAX_WAIT = 300  # 5 minutes
 
@@ -41,10 +41,15 @@ class EmotionAPIClient:
         if not image_path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
         
+        import mimetypes
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if not mime_type:
+            mime_type = "image/jpeg"
+            
         with open(image_path, "rb") as f:
             response = requests.post(
                 f"{self.base_url}/submit",
-                files={"file": f}
+                files={"file": (image_path.name, f, mime_type)}
             )
         
         if response.status_code != 200:
@@ -141,35 +146,117 @@ class EmotionAPIClient:
 def main():
     """Main example."""
     import argparse
+    import itertools
     
     parser = argparse.ArgumentParser(
         description="Analyze image emotions using queue-based API"
     )
-    parser.add_argument("image", help="Path to image file")
+    parser.add_argument("path", help="Path to image file or folder containing images")
     parser.add_argument("--url", default=API_URL, help="API base URL")
     parser.add_argument("--timeout", type=int, default=MAX_WAIT, 
                        help="Max wait time (seconds)")
+    parser.add_argument("--max", type=int, default=100, 
+                       help="Max number of images to process if a folder is provided")
     
     args = parser.parse_args()
     
     try:
         client = EmotionAPIClient(args.url)
-        result = client.analyze(args.image)
+        input_path = Path(args.path)
         
-        print("\n" + "="*60)
-        print("EMOTION ANALYSIS RESULT")
-        print("="*60)
-        print(json.dumps(result, indent=2))
-        
-        # Summary
-        if result.get("FaceAnalyzed"):
-            emotions = result.get("FacialExpressions", {})
-            if isinstance(emotions, dict):
-                dominant = emotions.get("DominantBasicEmotion")
-                print(f"\n✓ Dominant Emotion: {dominant}")
+        if input_path.is_file():
+            # Process a single image
+            result = client.analyze(str(input_path))
+            print("\n" + "="*60)
+            print("EMOTION ANALYSIS RESULT")
+            print("="*60)
+            print(json.dumps(result, indent=2))
+            
+            if result.get("FaceAnalyzed"):
+                emotions = result.get("FacialExpressions", {})
+                if isinstance(emotions, dict):
+                    dominant = emotions.get("DominantBasicEmotion")
+                    print(f"\n✓ Dominant Emotion: {dominant}")
+            else:
+                print("\n✗ No face detected in image")
+                
+        elif input_path.is_dir():
+            # Process up to N images in a directory
+            valid_exts = {".jpg", ".jpeg", ".png", ".bmp"}
+            all_files = [f for f in input_path.rglob("*") if f.is_file() and f.suffix.lower() in valid_exts]
+            selected_files = all_files[:args.max]
+            
+            if not selected_files:
+                print(f"No valid images found in {input_path}")
+                return 0
+                
+            print(f"Found {len(all_files)} images. Submitting {len(selected_files)} to the queue...")
+            
+            # 1. Submit them all as fast as possible
+            job_dict = {}  # Map job_id to filename
+            for img_path in selected_files:
+                try:
+                    job_id = client.submit_image(str(img_path))
+                    job_dict[job_id] = {"file": img_path.name, "status": "pending"}
+                    print(f"Submitted {img_path.name} -> ID: {job_id}")
+                except Exception as e:
+                    print(f"Failed to submit {img_path.name}: {e}")
+            
+            print(f"\nSuccessfully submitted {len(job_dict)} images.")
+            print("Now polling for results (this may take a while depending on queue load)...\n")
+            
+            # 2. Loop until all are done
+            start_time = time.time()
+            completed = 0
+            
+            while completed < len(job_dict):
+                elapsed = time.time() - start_time
+                if elapsed > args.timeout:
+                    print(f"\nTimeout reached ({args.timeout}s). Exiting.")
+                    break
+                    
+                completed = 0
+                active_statuses = []
+                
+                for job_id, info in list(job_dict.items()):
+                    if info["status"] in ["completed", "failed"]:
+                        completed += 1
+                        continue
+                        
+                    try:
+                        status_data = client.get_job_status(job_id)
+                        current_status = status_data["status"]
+                        job_dict[job_id]["status"] = current_status
+                        
+                        if current_status == "completed":
+                            result = client.get_result(job_id)
+                            dom = result.get("FacialExpressions", {}).get("DominantBasicEmotion", "None") if result.get("FaceAnalyzed") else "No Face"
+                            print(f"[{elapsed:.1f}s] DONE: {info['file']} -> {dom}")
+                            completed += 1
+                        elif current_status == "failed":
+                            print(f"[{elapsed:.1f}s] FAILED: {info['file']} -> {status_data.get('error')}")
+                            completed += 1
+                        else:
+                            active_statuses.append(current_status)
+                    except Exception as e:
+                        if "still processing" not in str(e) and "pending" not in str(e):
+                            pass
+                
+                # Print a progress update if not done
+                if completed < len(job_dict):
+                    pending_ct = active_statuses.count("pending")
+                    processing_ct = active_statuses.count("processing")
+                    print(f"   ... Progress: {completed}/{len(job_dict)} done (Pending: {pending_ct}, Processing: {processing_ct})")
+                    time.sleep(args.timeout if POLL_INTERVAL < 1 else POLL_INTERVAL)
+
+            print("\n" + "="*60)
+            print("ALL BATCH JOBS FINISHED")
+            print("="*60)
+            
         else:
-            print("\n✗ No face detected in image")
-        
+            print(f"Error: {input_path} is neither a file nor a directory.")
+            return 1
+            
         return 0
     
     except FileNotFoundError as e:

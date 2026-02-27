@@ -49,6 +49,11 @@ EMOTION_CONFIG = {
         "enhancers": ["AU10", "AU04", "AU17"], 
         "inhibitors": ["AU12"]
     },
+    "Confusion": {
+        "required": ["AU04", "AU07"], 
+        "enhancers": ["AU05", "AU06", "AU10", "AU23"], 
+        "inhibitors": ["AU12"]
+    },
     "Neutral": {
         "required": [], 
         "enhancers": [], 

@@ -16,6 +16,9 @@ from app.utils.constants import AU_LIST, FEATURE_NAMES, EMOTION_CONFIG
 # Import face pipeline
 from face.pipeline import FacePipeline
 
+# Import attribute predictor
+from app.services.face_attributes import get_attribute_predictor
+
 
 def load_image_with_exif_fix(image_data) -> np.ndarray:
     """
@@ -61,13 +64,10 @@ def load_image_with_exif_fix(image_data) -> np.ndarray:
     # Convert to BGR for OpenCV
     img_array = np.array(img)
     if len(img_array.shape) == 2:
-        # Grayscale
         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
     elif img_array.shape[2] == 4:
-        # RGBA
         img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
     else:
-        # RGB to BGR
         img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
     return img_array
@@ -91,6 +91,10 @@ class FaceEmotionAnalyzer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model, self.scaler_mean, self.scaler_scale = self._load_model()
         self.pipeline = FacePipeline()
+
+        # ── Face attribute predictor (gender, age, glasses, beard, moustache)
+        self.attribute_predictor = get_attribute_predictor()
+
         self._initialized = True
         print(f"✓ Analyzer initialized on {self.device}")
     
@@ -124,20 +128,15 @@ class FaceEmotionAnalyzer:
             (results, rotated_image, rotation_applied)
         """
         rotations = [
-            (0, None),                              # Original
-            (180, cv2.ROTATE_180),                  # Upside down
-            (90, cv2.ROTATE_90_CLOCKWISE),          # Rotated right
-            (270, cv2.ROTATE_90_COUNTERCLOCKWISE),  # Rotated left
+            (0,   None),
+            (180, cv2.ROTATE_180),
+            (90,  cv2.ROTATE_90_CLOCKWISE),
+            (270, cv2.ROTATE_90_COUNTERCLOCKWISE),
         ]
         
         for angle, rotate_code in rotations:
-            if rotate_code is not None:
-                rotated = cv2.rotate(image, rotate_code)
-            else:
-                rotated = image
-            
+            rotated = cv2.rotate(image, rotate_code) if rotate_code is not None else image
             results = self.pipeline.process(rotated, max_faces=10)
-            
             if results and results[0].geometry is not None:
                 return results, rotated, angle
         
@@ -159,13 +158,12 @@ class FaceEmotionAnalyzer:
         """Compute emotion scores with improved conflict resolution."""
         scores = {}
         
-        # Key AU values for conflict resolution
-        au12 = au_probs.get("AU12", 0)  # Smile
-        au15 = au_probs.get("AU15", 0)  # Lip corner depressor
-        au01 = au_probs.get("AU01", 0)  # Inner brow raise
-        au04 = au_probs.get("AU04", 0)  # Brow lowerer
-        au06 = au_probs.get("AU06", 0)  # Cheek raiser
-        au20 = au_probs.get("AU20", 0)  # Lip stretcher
+        au12 = au_probs.get("AU12", 0)
+        au15 = au_probs.get("AU15", 0)
+        au01 = au_probs.get("AU01", 0)
+        au04 = au_probs.get("AU04", 0)
+        au06 = au_probs.get("AU06", 0)
+        au20 = au_probs.get("AU20", 0)
 
         for emotion, config in EMOTION_CONFIG.items():
             if emotion == "Neutral":
@@ -173,67 +171,51 @@ class FaceEmotionAnalyzer:
                 scores[emotion] = max(0.05, 1.0 - total_activity / len(au_probs) * 1.5)
                 continue
 
-            required = config["required"]
+            required  = config["required"]
             enhancers = config["enhancers"]
             inhibitors = config["inhibitors"]
 
-            # Base score from required AUs
-            if required:
-                req_scores = [au_probs.get(au, 0) for au in required]
-                base = np.mean(req_scores)
-            else:
-                base = 0.2
-
-            # Enhancer bonus
+            base = np.mean([au_probs.get(au, 0) for au in required]) if required else 0.2
             if enhancers:
-                enh_scores = [au_probs.get(au, 0) for au in enhancers]
-                base += np.mean(enh_scores) * 0.15
-
-            # Inhibitor penalty (stronger)
+                base += np.mean([au_probs.get(au, 0) for au in enhancers]) * 0.15
             if inhibitors:
-                inh_scores = [au_probs.get(au, 0) for au in inhibitors]
-                base -= np.mean(inh_scores) * 0.5
-
+                base -= np.mean([au_probs.get(au, 0) for au in inhibitors]) * 0.5
             scores[emotion] = max(0, min(1, base))
 
-        # CONFLICT RESOLUTION
-        
-        # Happy vs Sad: AU12 (smile) is the key differentiator
+        # Conflict resolution
         if au12 > 0.6 and au12 > au15 + 0.2:
             scores["Happy"] = min(1.0, scores["Happy"] * 1.3)
-            scores["Sad"] = scores["Sad"] * 0.3
+            scores["Sad"]   = scores["Sad"] * 0.3
         elif au15 > 0.4 and au01 > 0.3 and au12 < 0.4:
-            scores["Sad"] = min(1.0, scores["Sad"] * 1.3)
+            scores["Sad"]   = min(1.0, scores["Sad"] * 1.3)
             scores["Happy"] = scores["Happy"] * 0.3
 
-        # Genuine smile (Duchenne): AU06 + AU12
         if au06 > 0.5 and au12 > 0.5:
             scores["Happy"] = min(1.0, scores["Happy"] * 1.2)
 
-        # Anger requires lack of smile
         if au12 > 0.5:
             scores["Angry"] = scores["Angry"] * 0.4
 
-        # Fear = Surprise + sustained tension
         surprise = scores.get("Surprised", 0.0)
-        scared = scores.get("Scared", 0.0)
+        scared   = scores.get("Scared",    0.0)
         if surprise > 0.25 and au20 > 0.5 and au04 > 0.25:
-            scores["Scared"] = max(scared, surprise * 1.1)
+            scores["Scared"]    = max(scared, surprise * 1.1)
             scores["Surprised"] = surprise * 0.6
 
-        # Normalize to sum to 1
         total = sum(scores.values())
         if total > 0:
             scores = {k: v / total for k, v in scores.items()}
 
         return scores
 
-    def _compute_valence_arousal(self, emotions: Dict[str, float], au_probs: Dict[str, float]) -> Tuple[float, float]:
+    def _compute_valence_arousal(
+        self, emotions: Dict[str, float], au_probs: Dict[str, float]
+    ) -> Tuple[float, float]:
         """Compute valence and arousal."""
         positive = emotions.get("Happy", 0) + emotions.get("Surprised", 0) * 0.3
-        negative = sum(emotions.get(e, 0) for e in ["Sad", "Angry", "Scared", "Disgusted"])
-        valence = (positive - negative + 1) / 2
-        arousal = np.mean([au_probs.get(au, 0) for au in ["AU05", "AU20", "AU25", "AU26", "AU27"]])
+        negative = sum(emotions.get(e, 0) for e in ["Sad", "Angry", "Scared", "Disgusted", "Confusion"])
+        valence  = (positive - negative + 1) / 2
+        arousal  = np.mean([au_probs.get(au, 0) for au in ["AU05", "AU20", "AU25", "AU26", "AU27"]])
         return float(np.clip(valence, 0, 1)), float(np.clip(arousal, 0, 1))
 
     def _empty_response(self, num_faces: int = 0, error: str = None) -> Dict[str, Any]:
@@ -247,7 +229,7 @@ class FaceEmotionAnalyzer:
             "BoundingBox": [0, 0, 0, 0],
             "NumberOfFaces": num_faces,
             "Characteristics": {
-                "Gender": "Unknown", "Age": "Unknown", 
+                "Gender": "Unknown", "Age": "Unknown",
                 "Glasses": "Unknown", "Moustache": "None", "Beard": "None"
             },
             "Focus": 0.0,
@@ -258,74 +240,85 @@ class FaceEmotionAnalyzer:
             response["Error"] = error
         return response
 
-    def _build_response(self, face, results, geometry, au_probs, emotions, rotation) -> Dict[str, Any]:
-        """Build success response."""
+    def _build_response(
+        self,
+        image: np.ndarray,          # ← full (possibly rotated) BGR image
+        face,
+        results: List,
+        geometry: dict,
+        au_probs: Dict[str, float],
+        emotions: Dict[str, float],
+        rotation: int,
+    ) -> Dict[str, Any]:
+        """Build success response, including face attribute predictions."""
         dominant = max(emotions, key=emotions.get)
         valence, arousal = self._compute_valence_arousal(emotions, au_probs)
-        
-        # Format AU output
-        action_units = []
-        for au in AU_LIST:
-            au_name = au.replace("AU0", "AU")  # AU01 → AU1
-            action_units.append({"Name": au_name, "Value": au_probs[au]})
-        
+
+        # ── Action Units ─────────────────────────────────────────────────────
+        action_units = [
+            {"Name": au.replace("AU0", "AU"), "Value": au_probs[au]}
+            for au in AU_LIST
+        ]
+
+        # ── Characteristics (gender, age, glasses, beard, moustache) ─────────
+        head_yaw = float(geometry.get("head_yaw", 0.0))
+        characteristics = self.attribute_predictor.predict(
+            image=image,
+            face_bbox=face.face_box,
+            head_yaw=head_yaw,
+        )
+
         return {
             "FaceAnalyzed": True,
             "FacialExpressions": {
                 "DominantBasicEmotion": dominant,
                 "BasicEmotions": emotions,
                 "Valence": valence,
-                "Arousal": arousal
+                "Arousal": arousal,
             },
-            "Characteristics": {
-                "Gender": "Unknown", "Age": "Unknown",
-                "Glasses": "Unknown", "Moustache": "None", "Beard": "None"
-            },
+            "Characteristics": characteristics,
             "ActionUnits": action_units,
             "Confidence": float(face.detection_confidence),
             "HeadOrientation": [
                 float(geometry.get("head_pitch", 0)),
-                float(geometry.get("head_yaw", 0)),
-                float(geometry.get("head_roll", 0))
+                float(geometry.get("head_yaw",   0)),
+                float(geometry.get("head_roll",  0)),
             ],
             "BoundingBox": [
-                int(face.face_box.x1), 
-                int(face.face_box.y1), 
-                int(face.face_box.width), 
-                int(face.face_box.height)
+                int(face.face_box.x1),
+                int(face.face_box.y1),
+                int(face.face_box.width),
+                int(face.face_box.height),
             ],
             "NumberOfFaces": len(results),
             "Focus": float(face.alignment_confidence * 100),
             "ActionableEmotion": dominant if emotions[dominant] > 0.3 else None,
-            "RotationApplied": rotation
+            "RotationApplied": rotation,
         }
 
     def _analyze_image(self, image: np.ndarray, try_rotations: bool = True) -> Dict[str, Any]:
         """Core analysis logic."""
-        # Try to find face (with rotation if needed)
         if try_rotations:
             results, image, rotation = self._try_rotations(image)
         else:
-            results = self.pipeline.process(image, max_faces=10)
+            results  = self.pipeline.process(image, max_faces=10)
             rotation = 0
 
         if not results:
             return self._empty_response()
 
-        # Use first (most confident) face
         face = results[0]
 
         if face.geometry is None:
             return self._empty_response(num_faces=len(results))
 
-        # Extract geometry and predict AUs
         geometry = face.geometry.to_dict()
-        au_probs = self._predict_aus(geometry)
+        au_probs  = self._predict_aus(geometry)
+        emotions  = self._compute_emotions(au_probs)
 
-        # Compute emotions
-        emotions = self._compute_emotions(au_probs)
-
-        return self._build_response(face, results, geometry, au_probs, emotions, rotation)
+        # Pass the (possibly rotated) image so the attribute predictor
+        # receives the same orientation as the detected face.
+        return self._build_response(image, face, results, geometry, au_probs, emotions, rotation)
 
     def analyze(self, image_path: str, try_rotations: bool = True) -> Dict[str, Any]:
         """Analyze image from file path."""
@@ -333,7 +326,6 @@ class FaceEmotionAnalyzer:
             image = load_image_with_exif_fix(image_path)
         except Exception as e:
             return self._empty_response(error=str(e))
-
         return self._analyze_image(image, try_rotations)
 
     def analyze_bytes(self, image_bytes: bytes, try_rotations: bool = True) -> Dict[str, Any]:
@@ -342,7 +334,6 @@ class FaceEmotionAnalyzer:
             image = load_image_with_exif_fix(image_bytes)
         except Exception as e:
             return self._empty_response(error=str(e))
-
         return self._analyze_image(image, try_rotations)
 
 
